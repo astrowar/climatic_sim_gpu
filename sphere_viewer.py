@@ -10,10 +10,65 @@ import glfw
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from OpenGL.arrays import vbo
+import multiprocessing
+import copy
 import time
 import threading
 import queue
 import copy
+
+def run_simulation_process(solver_class, grid_points, elevation_data, dt, data_queue, running_event):
+    """Standalone process to run simulation without GIL interference."""
+    print("[SIM PROCESS] Process started")
+    
+    try:
+        # Re-initialize solver in this process
+        # This ensures CUDA/C++ context is created in this process
+        solver = solver_class(grid_points, elevation_data=elevation_data)
+        print("[SIM PROCESS] Solver initialized")
+    except Exception as e:
+        print(f"[SIM PROCESS] Failed to initialize solver: {e}")
+        return
+
+    frame_count = 0
+    iterations_per_update = 1
+    step_count = 0
+    
+    while running_event.is_set():
+        try:
+            sim_result = solver.update_simulation(dt)
+            step_count += 20
+            
+            if step_count >= iterations_per_update:
+                step_count = 0
+                try:
+                    # Prepare data for queue
+                    data_copy = {
+                        'node_values': sim_result['scalars'],
+                        'wind_values': sim_result['vectors'],
+                        'pressure_values': sim_result['pressure'],
+                        'vertical_motion_values': sim_result['vertical_motion'],
+                        'time': solver.time,
+                        'frame': frame_count
+                    }
+                    
+                    # Put in queue (blocking with timeout to allow checking running_event)
+                    if not data_queue.full():
+                        data_queue.put(data_copy)
+                        if frame_count % 5 == 0:
+                            print(f"[SIM PROCESS] Sent frame {frame_count}")
+                        frame_count += 1
+                except Exception as e:
+                    print(f"[SIM PROCESS] Error putting data: {e}")
+            
+            # Yield to avoid 100% CPU usage in this core
+            time.sleep(0.01) 
+            
+        except Exception as e:
+            print(f"[SIM PROCESS] Error in loop: {e}")
+            break
+            
+    print("[SIM PROCESS] Process stopped")
 
 
 class OpenGLSphereViewer:
@@ -614,20 +669,35 @@ class OpenGLSphereViewer:
         print("[SIM THREAD] Simulation thread stopped")
     
     def start_simulation_thread(self):
-        """Start the simulation worker thread."""
-        if self.simulation_thread is None or not self.simulation_thread.is_alive():
-            self.simulation_running = True
-            self.simulation_thread = threading.Thread(target=self.simulation_worker, daemon=True)
-            self.simulation_thread.start()
-            print("[MAIN] Simulation thread launched")
+        """Start the simulation worker process."""
+        if hasattr(self, 'simulation_process') and self.simulation_process.is_alive():
+            return
+
+        print(f"[MAIN] Starting simulation in MULTIPROCESSING mode")
+        self.simulation_running = True
+        
+        # Use spawn context for CUDA compatibility
+        ctx = multiprocessing.get_context('spawn')
+        self.data_queue = ctx.Queue(maxsize=2)
+        self.simulation_running_event = ctx.Event()
+        self.simulation_running_event.set()
+        
+        self.simulation_process = ctx.Process(
+            target=run_simulation_process,
+            args=(self.fem_solver.__class__, self.grid_points, self.elevation_data, self.simulation_dt, self.data_queue, self.simulation_running_event)
+        )
+        self.simulation_process.start()
+        print("[MAIN] Simulation process launched")
     
     def stop_simulation_thread(self):
-        """Stop the simulation worker thread."""
-        if self.simulation_thread is not None and self.simulation_thread.is_alive():
-            print("[MAIN] Stopping simulation thread...")
-            self.simulation_running = False
-            self.simulation_thread.join(timeout=2.0)
-            print("[MAIN] Simulation thread stopped")
+        """Stop the simulation worker process."""
+        if hasattr(self, 'simulation_process') and self.simulation_process.is_alive():
+            print("[MAIN] Stopping simulation process...")
+            self.simulation_running_event.clear()
+            self.simulation_process.join(timeout=2.0)
+            if self.simulation_process.is_alive():
+                self.simulation_process.terminate()
+            print("[MAIN] Simulation process stopped")
     
     def elevation_to_color(self, elevation: float) -> tuple:
         """Convert elevation to base color (blue=ocean, green=land)."""
@@ -1011,15 +1081,20 @@ class OpenGLSphereViewer:
     
     def _draw_wind_vectors(self):
         """Draw wind vectors at two levels using spatially distributed sampling."""
-        if self.wind_values is None or not self.vbo_initialized or self.fem_solver is None:
+        if self.wind_values is None or not self.vbo_initialized:
             return
             
         glDisable(GL_LIGHTING)
         glLineWidth(2.0)
         
         # Get global wind data
-        global_winds = self.fem_solver.fluid_solver.get_wind_vectors()
-        global_nodes = self.fem_solver.global_nodes
+        global_winds = self.wind_values
+        
+        # Get global nodes
+        if self.fem_solver:
+            global_nodes = self.fem_solver.global_nodes
+        else:
+            return
         
         # Calculate max speed for scaling
         max_speed = np.max(np.linalg.norm(global_winds, axis=1))

@@ -62,7 +62,7 @@ def main(mesh_density: int = 15):
         print("Continuing without elevation data (will use face colors)...")
     
     # ========== MESH RELAXATION ==========
-    iterations = 50
+    iterations = 10
     omega = 0.5
     grid_points = mesh_relaxation(grid_points, iterations=iterations, omega=omega, 
                                   radius=1.0, verbose=True)
