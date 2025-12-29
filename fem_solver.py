@@ -295,6 +295,9 @@ class SphereFEMSolver:
         self.temperatures_layer1 = None  # Lower atmosphere, shape (n_nodes,)
         self.temperatures_layer2 = None  # Upper atmosphere, shape (n_nodes,)
         self.initial_temperature = INITIAL_GLOBAL_TEMPERATURE  # K (from params)
+
+        # Adicionar perturbação inicial na camada 1 (atmosfera baixa)
+        self._add_initial_perturbation = True
         
         # Global node values for visualization (shape: n_nodes)
         # Will show ground (surface) temperatures
@@ -544,6 +547,11 @@ class SphereFEMSolver:
             # Atmosphere starts slightly cooler (typical atmospheric profile)
             self.temperatures_layer1 = np.full(n_nodes, self.initial_temperature - 10.0)
             self.temperatures_layer2 = np.full(n_nodes, self.initial_temperature - 30.0)
+            # Adicionar perturbação inicial na camada 1
+            if getattr(self, '_add_initial_perturbation', False):
+                np.random.seed(42)
+                perturb = np.random.normal(0, 0.5, n_nodes)  # 0.5K de desvio padrão
+                self.temperatures_layer1 += perturb
             print(f"Initialized 3-layer temperature field: {n_nodes} nodes per layer")
         
         # ============================================================
@@ -609,28 +617,15 @@ class SphereFEMSolver:
         y = self.global_nodes[:, 1]
         z = self.global_nodes[:, 2]
         
-        # Calculate Diurnal Cycle (Moving Sun)
-        # Earth rotation period is ~24 hours (86400s)
-        # The sun moves around the Y axis (North/South)
-        day_seconds = 86400.0
-        rotation_angle = (self.time / day_seconds) * 2.0 * np.pi
-        
-        # Sun unit vector in X-Z plane
-        sun_x = np.cos(rotation_angle)
-        sun_z = np.sin(rotation_angle)
-        
-        # Surface normals (normalized node positions)
+        # Calculate latitude (radians)
         r = np.sqrt(x**2 + y**2 + z**2)
-        nx, ny, nz = x/r, y/r, z/r
-        
-        # Dot product of normal and sun vector: cos(theta)
-        # Only positive values (daylight)
-        cos_theta = np.maximum(0.0, nx * sun_x + nz * sun_z)
-        
-        # Solar flux at Top of Atmosphere (TOA)
-        # We use a combination of the moving sun (diurnal) and a small background 
-        # to represent atmospheric scattering/diffuse light so poles don't freeze to 0K.
-        S_toa = SOLAR_CONSTANT * (0.9 * cos_theta + 0.1 * (np.sqrt(x**2 + z**2) / r))
+        # Avoid division by zero
+        r = np.maximum(r, 1e-10)
+        lat_rad = np.arcsin(np.clip(y / r, -1.0, 1.0))
+        lat_deg = np.degrees(lat_rad)
+
+        # Use average solar radiation (no day/night cycle)
+        S_toa = solar_radiation_at_latitude_average(lat_deg)
         
         # Solar radiation flow (top to bottom) matching 3layers.py:
         # F_A2_SW = F_solar * a1 (Upper)
@@ -720,33 +715,36 @@ class SphereFEMSolver:
         
         self._temp_log_counter += 1
         if self._temp_log_counter % 100 == 0:
-            T0_min, T0_max, T0_mean = np.min(self.temperatures_ground), np.max(self.temperatures_ground), np.mean(self.temperatures_ground)
-            T1_min, T1_max, T1_mean = np.min(self.temperatures_layer1), np.max(self.temperatures_layer1), np.mean(self.temperatures_layer1)
-            T2_min, T2_max, T2_mean = np.min(self.temperatures_layer2), np.max(self.temperatures_layer2), np.mean(self.temperatures_layer2)
+            # Calculate regional averages
+            equator_mask = np.abs(lat_deg) < 10.0
+            poles_mask = np.abs(lat_deg) > 80.0
             
-            print(f"[Climate 3-Layer] Time: {self.time:.1f}s")
-            print(f"  Ground:    T_min={T0_min:.2f}K ({T0_min-273.15:.2f}°C) | "
-                  f"T_max={T0_max:.2f}K ({T0_max-273.15:.2f}°C) | T_mean={T0_mean:.2f}K ({T0_mean-273.15:.2f}°C)")
-            print(f"  Layer 1:   T_min={T1_min:.2f}K ({T1_min-273.15:.2f}°C) | "
-                  f"T_max={T1_max:.2f}K ({T1_max-273.15:.2f}°C) | T_mean={T1_mean:.2f}K ({T1_mean-273.15:.2f}°C)")
-            print(f"  Layer 2:   T_min={T2_min:.2f}K ({T2_min-273.15:.2f}°C) | "
-                  f"T_max={T2_max:.2f}K ({T2_max-273.15:.2f}°C) | T_mean={T2_mean:.2f}K ({T2_mean-273.15:.2f}°C)")
+            T0_mean = np.mean(self.temperatures_ground)
+            T0_eq = np.mean(self.temperatures_ground[equator_mask]) if np.any(equator_mask) else T0_mean
+            T0_pole = np.mean(self.temperatures_ground[poles_mask]) if np.any(poles_mask) else T0_mean
+            
+            T1_mean = np.mean(self.temperatures_layer1)
+            T1_eq = np.mean(self.temperatures_layer1[equator_mask]) if np.any(equator_mask) else T1_mean
+            T1_pole = np.mean(self.temperatures_layer1[poles_mask]) if np.any(poles_mask) else T1_mean
+            
+            print(f"[Climate] Time: {self.time:.1f}s")
+            print(f"  Ground Temp (°C):  Global={T0_mean-273.15:6.2f} | Equator={T0_eq-273.15:6.2f} | Poles={T0_pole-273.15:6.2f}")
+            print(f"  Air Temp    (°C):  Global={T1_mean-273.15:6.2f} | Equator={T1_eq-273.15:6.2f} | Poles={T1_pole-273.15:6.2f}")
         
         # ============================================================
         # STEP 6: ATMOSPHERE FLUID SOLVE (Horizontal heat transport)
         # ============================================================
         # Apply atmospheric fluid dynamics (heat diffusion)
-        # TEMPORARILY DISABLED - causes numerical instabilities
-        # self.solve_atmosphere_fluid(dt)
-        
+        self.solve_atmosphere_fluid(dt)
+
         # Update fluid dynamics (winds) based on Layer 1 temperature
         self.fluid_solver.update(dt, self.temperatures_layer1)
-        
+
         # Apply advection to Layer 1 temperature
         # This closes the loop: Temp -> Wind -> Temp
         # The wind moves the heat around, changing the temperature field
         self.temperatures_layer1 = self.fluid_solver.advect(self.temperatures_layer1, dt)
-        
+
         # Convert ground temperatures to element values for visualization
         self._temperatures_to_element_values()
     
@@ -754,18 +752,20 @@ class SphereFEMSolver:
         """
         Solve atmospheric fluid dynamics: horizontal heat diffusion.
         
-        Models lateral heat transport in the atmosphere using diffusion equation:
-        dT/dt = κ ∇²T
+        Models lateral heat transport emulating dT/dt = kappa * Laplacian(T).
+        Aplica difusão explícita na camada 1 (temperatura da atmosfera baixa).
         
-        Uses FEM connectivity to compute Laplacian for each node.
-        
-        Parameters
+        Parâmetros
         ----------
         dt : float
             Time step in seconds
         """
-        # Legacy method - replaced by FluidSolver class
-        pass
+        # Coeficiente de difusão reduzido para permitir formação de células (ex: 2000 m²/s)
+        kappa = 2000.0  # m²/s (valor típico para atmosfera, pode ajustar)
+        # Calcular Laplaciano usando FluidSolver
+        laplacian_T = self.fluid_solver._compute_laplacian(self.temperatures_layer1)
+        # Atualizar temperatura da camada 1
+        self.temperatures_layer1 += kappa * laplacian_T * dt
     
     def _temperatures_to_element_values(self):
         """

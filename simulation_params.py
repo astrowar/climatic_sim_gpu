@@ -149,6 +149,11 @@ TIME_STEP = 3600.0  # seconds
 # Earth rotation period (seconds)
 EARTH_ROTATION_PERIOD = 86400.0  # 24 hours
 
+# Earth angular velocity (rad/s)
+# Real Earth: 7.29e-5 rad/s
+# Increased for simulation to force Hadley cell breakup on coarse grids
+EARTH_ANGULAR_VELOCITY = 7.29e-5  # rad/s
+
 # Earth orbital period (seconds)
 EARTH_ORBITAL_PERIOD = 31557600.0  # 365.25 days
 

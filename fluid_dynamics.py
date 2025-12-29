@@ -1,7 +1,7 @@
 
 import numpy as np
 from typing import Dict, List, Tuple
-from simulation_params import EARTH_RADIUS
+from simulation_params import EARTH_RADIUS, EARTH_ANGULAR_VELOCITY
 
 class FluidSolver:
     """
@@ -36,8 +36,9 @@ class FluidSolver:
         
         # Physical constants
         self.R_gas = 287.0  # J/(kg·K) - Specific gas constant for dry air
-        self.omega = 7.2921e-5  # rad/s - Earth rotation rate
-        self.drag_coeff = 1.0e-5 # Reduced to allow Coriolis to break cells (Hadley/Ferrel/Polar)
+        # Rotation rate from parameters
+        self.omega = EARTH_ANGULAR_VELOCITY
+        self.drag_coeff = 5.0e-6 # Reduced friction to allow geostrophic balance
         self.drag_coeff_quad = 1.0e-7 # Reduced for more fluid motion
         
         # Precompute neighbor graph for gradient calculations
@@ -149,16 +150,23 @@ class FluidSolver:
         # Compute Laplacian of density for diffusion (smoothing)
         # This prevents checkerboard patterns and numerical instability
         laplacian_rho = self._compute_laplacian(self.density)
-        diffusion_coeff = 100000.0 # m²/s - Artificial viscosity (increased for stability)
+        diffusion_coeff = 20000.0 # m²/s - Reduced artificial viscosity to allow smaller cells
         
+        # Thermal Buoyancy Term (Simulates vertical convection)
+        # Hot air rises -> Mass loss at surface -> Density decreases
+        # Cold air sinks -> Mass gain at surface -> Density increases
+        # This creates Thermal Lows at equator and Thermal Highs at poles
+        T_mean = np.mean(temperatures)
+        buoyancy_coeff = 2.0e-4  # Reduced to prevent instability
+        thermal_forcing = -buoyancy_coeff * (temperatures - T_mean) * self.density
+
         # Update density
-        # d(rho)/dt = -div(rho*v) + nu * laplacian(rho)
-        self.density += (-divergence + diffusion_coeff * laplacian_rho) * dt
+        # d(rho)/dt = -div(rho*v) + nu * laplacian(rho) + thermal_forcing
+        self.density += (-divergence + diffusion_coeff * laplacian_rho + thermal_forcing) * dt
         
         # Apply explicit smoothing filter to remove checkerboard artifacts
-        # This is more effective than the Laplacian term for grid-scale noise
-        # Increased smoothing factor to 0.2 (20% neighbor average per step)
-        self.density = self._smooth_field(self.density, factor=0.2)
+        # Reduced smoothing to preserve gradients for Ferrel/Polar cells
+        self.density = self._smooth_field(self.density, factor=0.01)
         
         self.density = np.clip(self.density, 0.1, 10.0) # Prevent vacuum or black hole
         
@@ -167,7 +175,7 @@ class FluidSolver:
         self.pressure = self.density * self.R_gas * temperatures
         
         # Smooth pressure field as well to prevent gradient spikes
-        self.pressure = self._smooth_field(self.pressure, factor=0.1)
+        self.pressure = self._smooth_field(self.pressure, factor=0.01)
         
         # 2. Compute Pressure Gradient Force (PGF)
         # F_pg = -(1/rho) * grad(P)
@@ -201,16 +209,30 @@ class FluidSolver:
         
         self.velocity += acceleration * dt
         
+        # Limit maximum velocity to prevent numerical explosion
+        max_velocity = 150.0 # m/s (Jet streams can reach ~100-150 m/s)
+        current_speed = np.linalg.norm(self.velocity, axis=1, keepdims=True)
+        # Avoid division by zero
+        current_speed = np.maximum(current_speed, 1e-10)
+        
+        # Apply limit where speed exceeds max
+        mask = current_speed > max_velocity
+        # We need to broadcast the scaling factor
+        scale_factor = np.ones_like(current_speed)
+        scale_factor[mask] = max_velocity / current_speed[mask]
+        
+        self.velocity *= scale_factor
+        
         # 3.5 Advection of Momentum (Inertia)
         # This makes the wind "carry" its own speed, creating swirls and vortices
         self.velocity = self.advect_vector(self.velocity, dt)
         
         # Apply momentum diffusion (viscosity) via smoothing
         # This helps stabilize the velocity field
-        # Reduced factor to 0.02 to preserve more detail in the flow
-        vx = self._smooth_field(self.velocity[:, 0], factor=0.02)
-        vy = self._smooth_field(self.velocity[:, 1], factor=0.02)
-        vz = self._smooth_field(self.velocity[:, 2], factor=0.02)
+        # Reduced factor to preserve more detail in the flow
+        vx = self._smooth_field(self.velocity[:, 0], factor=0.005)
+        vy = self._smooth_field(self.velocity[:, 1], factor=0.005)
+        vz = self._smooth_field(self.velocity[:, 2], factor=0.005)
         self.velocity = np.stack([vx, vy, vz], axis=1)
         
         # 4. Project velocity to tangent plane (enforce flow on sphere surface)

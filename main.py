@@ -158,7 +158,7 @@ if __name__ == "__main__":
     # - Medium (15-20): Balanced (recommended)
     # - High (25-40): Slow, fine mesh
     # - Very high (50+): Very slow, very fine mesh
-    MESH_DENSITY = 50
+    MESH_DENSITY = 30
     
     # ========== TIME STEP CONFIGURATION ==========
     # Simulation time step (seconds per iteration)
