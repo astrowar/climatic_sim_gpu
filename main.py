@@ -8,7 +8,8 @@ with time-dependent FEM simulations.
 from mesh_generator import generate_cubed_sphere_grid, mesh_relaxation, add_elevation_data, normalize_elevation_data
 from mesh_quality import compute_mesh_quality
 from sphere_viewer import OpenGLSphereViewer
-from native_solver import SphereFEMSolver
+# from native_solver import SphereFEMSolver
+from opencl_solver import OpenCLFEMSolver
 from elevation_reader import ElevationReader
 import os
 
@@ -87,7 +88,8 @@ def main(mesh_density: int = 15):
     if elevation_reader is not None:
         elevation_data_normalized = normalize_elevation_data(grid_points)
     
-    solver = SphereFEMSolver(grid_points, elevation_data=elevation_data_normalized)
+    # solver = SphereFEMSolver(grid_points, elevation_data=elevation_data_normalized)
+    solver = OpenCLFEMSolver(grid_points, elevation_data=elevation_data_normalized)
     print(f"\nMesh statistics:")
     print(f"  Total elements: {solver.get_element_count()}")
     print(f"  Total nodes: {solver.get_node_count()}")
@@ -96,7 +98,7 @@ def main(mesh_density: int = 15):
     USE_THREADS = True          # Enable threaded simulation
     HEAVY_COMPUTATION = False   # Simulate expensive computation (disabled for climate model)
     COMPUTATION_DELAY = 0.0     # Delay per simulation step (seconds)
-    SIMULATION_DT = 0.01       # Time step in seconds (300s = 5 minutes)
+    SIMULATION_DT = 1000.0       # Time step in seconds (300s = 5 minutes)
     
     print(f"\nSimulation mode:")
     print(f"  Time step: {SIMULATION_DT:.1f}s ({SIMULATION_DT/60:.1f} minutes)")
@@ -112,7 +114,7 @@ def main(mesh_density: int = 15):
  
     
     # Get initial values
-    node_values = solver.update_simulation(0.0)
+    initial_data = solver.update_simulation(0.0)
     
     # ========== VISUALIZATION ==========
     print("\nLaunching OpenGL viewer...")
@@ -127,7 +129,8 @@ def main(mesh_density: int = 15):
     
     viewer = OpenGLSphereViewer(width=1200, height=900)
     viewer.load_grid_data(grid_points, 
-                         node_values=node_values, 
+                         node_values=initial_data['scalars'], 
+                         albedo_values=initial_data.get('albedo'),
                          fem_solver=solver,
                          use_threads=USE_THREADS,
                          elevation_reader=elevation_reader,
@@ -142,7 +145,7 @@ if __name__ == "__main__":
     # - Medium (15-20): Balanced (recommended)
     # - High (25-40): Slow, fine mesh
     # - Very high (50+): Very slow, very fine mesh
-    MESH_DENSITY = 40
+    MESH_DENSITY = 20
     
     # ========== TIME STEP CONFIGURATION ==========
     # Simulation time step (seconds per iteration)

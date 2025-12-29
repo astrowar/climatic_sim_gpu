@@ -51,6 +51,10 @@ def run_simulation_process(solver_class, grid_points, elevation_data, dt, data_q
                         'time': solver.time,
                         'frame': frame_count
                     }
+                    if 'vertical_motion_flat' in sim_result:
+                        data_copy['vertical_motion_flat'] = sim_result['vertical_motion_flat']
+                    if 'albedo' in sim_result:
+                        data_copy['albedo'] = sim_result['albedo']
                     
                     # Put in queue (blocking with timeout to allow checking running_event)
                     if not data_queue.full():
@@ -121,6 +125,8 @@ class OpenGLSphereViewer:
         self.wind_values = None  # Store wind vectors
         self.pressure_values = None # Store pressure values
         self.vertical_motion_values = None # Store vertical motion proxy
+        self.vertical_motion_flat = None # Store vertical motion flat array for vectors
+        self.albedo_values = None # Store albedo values
         self.show_fem_colors = False
         self.fem_solver = None
         self.animate_fem = False
@@ -153,6 +159,8 @@ class OpenGLSphereViewer:
         glfw.set_cursor_pos_callback(self.window, self._cursor_pos_callback)
         glfw.set_scroll_callback(self.window, self._scroll_callback)
         glfw.set_framebuffer_size_callback(self.window, self._resize_callback)
+        
+        self.update_window_title()
         
     def _init_gl(self):
         """Configure OpenGL settings."""
@@ -289,6 +297,20 @@ class OpenGLSphereViewer:
         
         print("Shaders compiled and linked successfully")
     
+    def update_window_title(self):
+        """Update window title with current visualization mode."""
+        mode_str = self.scalar_mode.upper()
+        
+        features = []
+        if self.show_wind: features.append("Wind")
+        if self.show_fem_colors: features.append("FEM")
+        if self.use_elevation_colors: features.append("Topo")
+        if self.show_temperature_only: features.append("ScalarOnly")
+        
+        feature_str = " | ".join(features)
+        title = f"Climatic Sim GPU - Mode: {mode_str} [{feature_str}]"
+        glfw.set_window_title(self.window, title)
+
     def _setup_perspective(self):
         """Set up the projection matrix."""
         glMatrixMode(GL_PROJECTION)
@@ -300,41 +322,47 @@ class OpenGLSphereViewer:
     def _key_callback(window, key, scancode, action, mods):
         """Handle keyboard input."""
         viewer = glfw.get_window_user_pointer(window)
-        if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
+        
+        if action != glfw.PRESS:
+            return
+            
+        if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
-        elif key == glfw.KEY_W and action == glfw.PRESS:
+        elif key == glfw.KEY_W:
             viewer.show_wireframe = not viewer.show_wireframe
             print(f"Wireframe: {'ON' if viewer.show_wireframe else 'OFF'}")
-        elif key == glfw.KEY_P and action == glfw.PRESS:
+        elif key == glfw.KEY_P:
             viewer.show_points = not viewer.show_points
             print(f"Points: {'ON' if viewer.show_points else 'OFF'}")
-        elif key == glfw.KEY_F and action == glfw.PRESS:
+        elif key == glfw.KEY_F:
             viewer.show_faces = not viewer.show_faces
             print(f"Filled faces: {'ON' if viewer.show_faces else 'OFF'}")
-        elif key == glfw.KEY_R and action == glfw.PRESS:
+        elif key == glfw.KEY_R:
             viewer.reset_view()
             print("View reset")
-        elif key == glfw.KEY_C and action == glfw.PRESS:
+        elif key == glfw.KEY_C:
             viewer.show_fem_colors = not viewer.show_fem_colors
             print(f"FEM colors: {'ON' if viewer.show_fem_colors else 'OFF'}")
-        elif key == glfw.KEY_A and action == glfw.PRESS:
+        elif key == glfw.KEY_A:
             viewer.animate_fem = not viewer.animate_fem
             print(f"FEM animation: {'ON' if viewer.animate_fem else 'OFF'}")
-        elif key == glfw.KEY_E and action == glfw.PRESS:
+        elif key == glfw.KEY_E:
             viewer.use_elevation_colors = not viewer.use_elevation_colors
             print(f"Elevation colors: {'ON' if viewer.use_elevation_colors else 'OFF'}")
-        elif key == glfw.KEY_T and action == glfw.PRESS:
+        elif key == glfw.KEY_T:
             viewer.show_temperature_only = not viewer.show_temperature_only
             print(f"Temperature only mode: {'ON' if viewer.show_temperature_only else 'OFF'}")
             # Force update
             if viewer.vbo_initialized:
                 for face_id in range(6):
                     viewer._update_color_vbo(face_id)
-        elif key == glfw.KEY_M and action == glfw.PRESS:
+        elif key == glfw.KEY_M:
             if viewer.scalar_mode == 'temperature':
                 viewer.scalar_mode = 'pressure'
             elif viewer.scalar_mode == 'pressure':
                 viewer.scalar_mode = 'vertical'
+            elif viewer.scalar_mode == 'vertical':
+                viewer.scalar_mode = 'albedo'
             else:
                 viewer.scalar_mode = 'temperature'
             print(f"Scalar Mode: {viewer.scalar_mode.upper()}")
@@ -342,9 +370,11 @@ class OpenGLSphereViewer:
             if viewer.vbo_initialized:
                 for face_id in range(6):
                     viewer._update_color_vbo(face_id)
-        elif key == glfw.KEY_V and action == glfw.PRESS:
+        elif key == glfw.KEY_V:
             viewer.show_wind = not viewer.show_wind
             print(f"Wind vectors: {'ON' if viewer.show_wind else 'OFF'}")
+            
+        viewer.update_window_title()
     
     @staticmethod
     def _mouse_button_callback(window, button, action, mods):
@@ -385,10 +415,11 @@ class OpenGLSphereViewer:
         glViewport(0, 0, width, height)
         viewer._setup_perspective()
         
-    def load_grid_data(self, grid_points, node_values=None, fem_solver=None, use_threads=False, elevation_reader=None, simulation_dt=100.0):
+    def load_grid_data(self, grid_points, node_values=None, fem_solver=None, use_threads=False, elevation_reader=None, simulation_dt=100.0, albedo_values=None):
         """Load cubed-sphere grid data and optional FEM values."""
         self.grid_points = grid_points
         self.node_values = node_values
+        self.albedo_values = albedo_values
         self.fem_solver = fem_solver
         self.use_threaded_simulation = use_threads
         self.elevation_reader = elevation_reader
@@ -518,8 +549,11 @@ class OpenGLSphereViewer:
         
         # Use fixed temperature color bounds: -20°C .. +50°C
         # Auto-scaling disabled per user request.
-        temp_min = -20.0
-        temp_max = 50.0
+        # OpenCL solver returns Kelvin, so we need to adjust the range
+        # 253.15 K = -20 C
+        # 323.15 K = +50 C
+        temp_min = 253.15
+        temp_max = 323.15
 
         for i in range(rows):
             for j in range(cols):
@@ -533,6 +567,12 @@ class OpenGLSphereViewer:
                         data_source = self.node_values
                     elif self.scalar_mode == 'pressure':
                         data_source = self.pressure_values
+                    elif self.scalar_mode == 'vertical':
+                        data_source = self.vertical_motion_values
+                    elif self.scalar_mode == 'albedo':
+                        data_source = self.albedo_values
+                        if self.show_fem_colors and data_source is None and i==0 and j==0:
+                             print("[RENDER] Albedo mode active but data_source is None")
 
                     if self.show_fem_colors and data_source is not None and face_key in data_source:
                         node_vals = data_source[face_key]
@@ -545,8 +585,22 @@ class OpenGLSphereViewer:
                                 norm = float(sim_value)
                             norm = float(np.clip(norm, 0.0, 1.0))
                             color = self.simulation_to_color(norm)
-                        else:
-                            color = self.pressure_to_color(sim_value)
+                        elif self.scalar_mode == 'pressure':
+                            # Normalize pressure: 98000 Pa to 104000 Pa
+                            p_min = 98000.0
+                            p_max = 104000.0
+                            norm = (sim_value - p_min) / (p_max - p_min)
+                            norm = float(np.clip(norm, 0.0, 1.0))
+                            color = self.pressure_to_color(norm)
+                        elif self.scalar_mode == 'vertical':
+                            # Normalize vertical motion (temp anomaly): -10 K to +10 K
+                            v_min = -10.0
+                            v_max = 10.0
+                            norm = (sim_value - v_min) / (v_max - v_min)
+                            norm = float(np.clip(norm, 0.0, 1.0))
+                            color = self.vertical_to_color(norm)
+                        else: # albedo
+                            color = self.albedo_to_color(sim_value)
                     else:
                         # No simulation, show gray
                         color = (0.5, 0.5, 0.5)
@@ -572,6 +626,8 @@ class OpenGLSphereViewer:
                             data_source = self.pressure_values
                         elif self.scalar_mode == 'vertical':
                             data_source = self.vertical_motion_values
+                        elif self.scalar_mode == 'albedo':
+                            data_source = self.albedo_values
                             
                         if data_source is not None and face_key in data_source:
                             node_vals = data_source[face_key]
@@ -586,9 +642,21 @@ class OpenGLSphereViewer:
                                 norm = float(np.clip(norm, 0.0, 1.0))
                                 sim_color = self.simulation_to_color(norm)
                             elif self.scalar_mode == 'pressure':
-                                sim_color = self.pressure_to_color(sim_value)
-                            else: # vertical
-                                sim_color = self.vertical_to_color(sim_value)
+                                # Normalize pressure: 98000 Pa to 104000 Pa
+                                p_min = 98000.0
+                                p_max = 104000.0
+                                norm = (sim_value - p_min) / (p_max - p_min)
+                                norm = float(np.clip(norm, 0.0, 1.0))
+                                sim_color = self.pressure_to_color(norm)
+                            elif self.scalar_mode == 'vertical':
+                                # Normalize vertical motion (temp anomaly): -10 K to +10 K
+                                v_min = -10.0
+                                v_max = 10.0
+                                norm = (sim_value - v_min) / (v_max - v_min)
+                                norm = float(np.clip(norm, 0.0, 1.0))
+                                sim_color = self.vertical_to_color(norm)
+                            else: # albedo
+                                sim_color = self.albedo_to_color(sim_value)
                             
                             # Mix: 60% base + 40% simulation
                             color = (
@@ -655,6 +723,11 @@ class OpenGLSphereViewer:
                         'time': self.fem_solver.time,
                         'frame': frame_count
                     }
+                    if 'vertical_motion_flat' in sim_result:
+                        data_copy['vertical_motion_flat'] = copy.deepcopy(sim_result['vertical_motion_flat'])
+                    if 'albedo' in sim_result:
+                        data_copy['albedo'] = copy.deepcopy(sim_result['albedo'])
+                        
                     self.data_queue.put(data_copy, block=False)
                     if frame_count % 5 == 0:
                         print(f"[SIM THREAD] Sent frame {frame_count}, sim_time={self.fem_solver.time:.1f}s, queue_size={self.data_queue.qsize()}")
@@ -754,6 +827,25 @@ class OpenGLSphereViewer:
             b = 1.0 - t
             
         return (r, g, b)
+
+    def albedo_to_color(self, value: float) -> tuple:
+        """Convert albedo value [0, 1] to color overlay."""
+        # Albedo: 0.3 (Ocean/Land) -> 0.7 (Snow)
+        # Map to White scale
+        # If value > 0.35, start showing white
+        
+        if value <= 0.31:
+            # Transparent/Base color (return something neutral or handle in blend)
+            # Since we blend 40%, let's return black so it darkens slightly or 
+            # return the base color equivalent?
+            # Let's return a dark blue/green to represent "no snow"
+            return (0.0, 0.0, 0.0) 
+        else:
+            # Snow: White
+            # Scale intensity from 0.3 to 0.7
+            norm = (value - 0.3) / 0.4
+            norm = np.clip(norm, 0.0, 1.0)
+            return (norm, norm, norm)
 
     def vertical_to_color(self, value: float) -> tuple:
         """Convert vertical motion [0, 1] to color overlay."""
@@ -1075,8 +1167,8 @@ class OpenGLSphereViewer:
         self._apply_camera_transform()
         self._draw_axes()
         self._draw_grid()
-        #if self.show_wind:
-        #    self._draw_wind_vectors()
+        if self.show_wind:
+            self._draw_wind_vectors()
         glfw.swap_buffers(self.window)
     
     def _draw_wind_vectors(self):
@@ -1148,7 +1240,26 @@ class OpenGLSphereViewer:
             ux, uy, uz = x*h, y*h, z*h
             
             # Color based on vertical motion if available
-            if self.vertical_motion_values is not None and self.fem_solver is not None:
+            if self.vertical_motion_flat is not None:
+                v_val = self.vertical_motion_flat[node_id]
+                # Use pre-calculated stats if possible, or just simple scaling
+                # For now, let's assume range -5 to +5 (approximate for temp anomaly)
+                # Hot (rising) = Red, Cold (sinking) = Blue
+                
+                # Normalize to 0..1 range (assuming -10 to +10 range)
+                v_normalized = (v_val + 10.0) / 20.0
+                v_normalized = np.clip(v_normalized, 0.0, 1.0)
+                
+                # Blue (0) -> White (0.5) -> Red (1)
+                if v_normalized < 0.5:
+                    # Blue to White
+                    f = v_normalized * 2.0
+                    glColor3f(f, f, 1.0)
+                else:
+                    # White to Red
+                    f = (v_normalized - 0.5) * 2.0
+                    glColor3f(1.0, 1.0 - f, 1.0 - f)
+            elif self.vertical_motion_values is not None and self.fem_solver is not None and hasattr(self.fem_solver, 'fluid_solver'):
                 v_val = self.fem_solver.fluid_solver.vertical_velocity[node_id]
                 v_mean = np.mean(self.fem_solver.fluid_solver.vertical_velocity)
                 v_std = np.std(self.fem_solver.fluid_solver.vertical_velocity)
@@ -1228,7 +1339,7 @@ class OpenGLSphereViewer:
         print("  C                - Toggle FEM colors overlay")
         print("  E                - Toggle elevation base colors")
         print("  T                - Toggle temperature-only mode")
-        print("  M                - Toggle scalar mode (Temp/Pressure/Vertical)")
+        print("  M                - Toggle scalar mode (Temp/Pressure/Vertical/Albedo)")
         print("  V                - Toggle wind vectors")
         print("  A                - Toggle FEM animation")
         print("  R                - Reset view")
@@ -1260,6 +1371,12 @@ class OpenGLSphereViewer:
                             self.pressure_values = data['pressure_values']
                         if 'vertical_motion_values' in data:
                             self.vertical_motion_values = data['vertical_motion_values']
+                        if 'vertical_motion_flat' in data:
+                            self.vertical_motion_flat = data['vertical_motion_flat']
+                        if 'albedo' in data:
+                            self.albedo_values = data['albedo']
+                            if frame_count % 100 == 0:
+                                print(f"[VIEWER] Albedo data received. Keys: {list(self.albedo_values.keys())}")
                         sim_time = data['time']
                         sim_frame = data['frame']
                         
@@ -1274,6 +1391,13 @@ class OpenGLSphereViewer:
                     self.node_values = sim_result['scalars']
                     self.wind_values = sim_result['vectors']
                     self.pressure_values = sim_result['pressure']
+                    self.vertical_motion_values = sim_result['vertical_motion']
+                    if 'vertical_motion_flat' in sim_result:
+                        self.vertical_motion_flat = sim_result['vertical_motion_flat']
+                    if 'albedo' in sim_result:
+                        self.albedo_values = sim_result['albedo']
+                        if frame_count % 100 == 0:
+                             print(f"[VIEWER] Albedo data received (Direct). Keys: {list(self.albedo_values.keys())}")
             
             glfw.poll_events()
             self.draw()
