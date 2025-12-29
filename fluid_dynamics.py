@@ -1,7 +1,7 @@
 
 import numpy as np
 from typing import Dict, List, Tuple
-from simulation_params import EARTH_RADIUS, EARTH_ANGULAR_VELOCITY
+from python_solver.simulation_params import EARTH_RADIUS, EARTH_ANGULAR_VELOCITY
 
 class FluidSolver:
     """

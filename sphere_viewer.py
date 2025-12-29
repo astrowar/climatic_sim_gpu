@@ -461,6 +461,11 @@ class OpenGLSphereViewer:
         # Check if we have elevation data
         has_elevation = self.elevation_data is not None and self.use_elevation_colors
         
+        # Use fixed temperature color bounds: -20°C .. +50°C
+        # Auto-scaling disabled per user request.
+        temp_min = -20.0
+        temp_max = 50.0
+
         for i in range(rows):
             for j in range(cols):
                 # Temperature-only mode: skip base colors and elevation
@@ -473,13 +478,18 @@ class OpenGLSphereViewer:
                         data_source = self.node_values
                     elif self.scalar_mode == 'pressure':
                         data_source = self.pressure_values
-                        
+
                     if self.show_fem_colors and data_source is not None and face_key in data_source:
                         node_vals = data_source[face_key]
                         sim_value = node_vals[i, j]
-                        
                         if self.scalar_mode == 'temperature':
-                            color = self.simulation_to_color(sim_value)
+                            # Normalize using precomputed temp_min/temp_max when available
+                            if temp_min is not None and temp_max is not None and temp_max != temp_min:
+                                norm = (sim_value - temp_min) / (temp_max - temp_min)
+                            else:
+                                norm = float(sim_value)
+                            norm = float(np.clip(norm, 0.0, 1.0))
+                            color = self.simulation_to_color(norm)
                         else:
                             color = self.pressure_to_color(sim_value)
                     else:
@@ -514,7 +524,12 @@ class OpenGLSphereViewer:
                             
                             # Blend base color with simulation color
                             if self.scalar_mode == 'temperature':
-                                sim_color = self.simulation_to_color(sim_value)
+                                if temp_min is not None and temp_max is not None and temp_max != temp_min:
+                                    norm = (sim_value - temp_min) / (temp_max - temp_min)
+                                else:
+                                    norm = float(sim_value)
+                                norm = float(np.clip(norm, 0.0, 1.0))
+                                sim_color = self.simulation_to_color(norm)
                             elif self.scalar_mode == 'pressure':
                                 sim_color = self.pressure_to_color(sim_value)
                             else: # vertical
@@ -559,8 +574,9 @@ class OpenGLSphereViewer:
     def simulation_worker(self):
         """Worker thread that runs FEM simulation independently."""
         print("[SIM THREAD] Simulation thread started")
+         
         frame_count = 0
-        iterations_per_update = 20  # Run 20 simulation steps before updating visualization
+        iterations_per_update = 1  # Run 20 simulation steps before updating visualization
         step_count = 0
         dt = self.simulation_dt  # Use configurable time step
         print(f"[SIM THREAD] Using dt = {dt:.1f}s ({dt/60:.1f} minutes)")
@@ -568,7 +584,7 @@ class OpenGLSphereViewer:
         while self.simulation_running:
             # Run single simulation step
             sim_result = self.fem_solver.update_simulation(dt)
-            step_count += 1
+            step_count += 20
             
             # Only update queue after 20 steps
             if step_count >= iterations_per_update:
@@ -589,10 +605,11 @@ class OpenGLSphereViewer:
                         print(f"[SIM THREAD] Sent frame {frame_count}, sim_time={self.fem_solver.time:.1f}s, queue_size={self.data_queue.qsize()}")
                     frame_count += 1
                 except queue.Full:
+                    print("[SIM THREAD] Data queue full, skipping update")
                     pass
             
             # Small sleep to avoid consuming 100% CPU
-            time.sleep(0.001)
+            time.sleep(0.1)
         
         print("[SIM THREAD] Simulation thread stopped")
     
@@ -932,7 +949,7 @@ class OpenGLSphereViewer:
         if self.grid_points is None:
             return
         
-        for face_id in range(6):
+        for face_id in range(6):           
             if self.show_faces:
                 self._draw_face_filled(face_id, alpha=0.3)
             if self.show_wireframe:
@@ -988,8 +1005,8 @@ class OpenGLSphereViewer:
         self._apply_camera_transform()
         self._draw_axes()
         self._draw_grid()
-        if self.show_wind:
-            self._draw_wind_vectors()
+        #if self.show_wind:
+        #    self._draw_wind_vectors()
         glfw.swap_buffers(self.window)
     
     def _draw_wind_vectors(self):

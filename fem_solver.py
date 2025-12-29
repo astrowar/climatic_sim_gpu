@@ -1,28 +1,12 @@
 """
-Finite Element Method Solver for Cubed-Sphere Grid
+Compatibility stub for legacy import path.
 
-This module provides a simple FEM solver that simulates physical phenomena
-on the spherical mesh and returns scalar values for each element.
+The implementation has moved to the `python_solver` package. Import
+from `python_solver.fem_solver` instead. This small stub raises an
+ImportError to make the change explicit at runtime.
 """
 
-import numpy as np
-import time
-from typing import Dict, Tuple
-import sys
-import os
-
-# Add parent directory to path to import simulation_params
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from simulation_params import (AVERAGE_SOLAR_RADIATION, EARTH_ALBEDO, 
-                               STEFAN_BOLTZMANN, ATMOSPHERIC_EMISSIVITY,
-                               EARTH_RADIUS, ATMOSPHERIC_LAYER_HEIGHT,
-                               AIR_DENSITY, AIR_HEAT_CAPACITY,
-                               INITIAL_GLOBAL_TEMPERATURE, SOLAR_CONSTANT, 
-                               solar_radiation_at_latitude_average,
-                               ATMOSPHERIC_THERMAL_DIFFUSIVITY)
-
-from fluid_dynamics import FluidSolver
-
+raise ImportError("fem_solver moved to python_solver.fem_solver; import from python_solver.fem_solver instead")
 
 
 def convert_cubed_sphere_to_fem(grid_points: Dict) -> Tuple[np.ndarray, np.ndarray, Dict]:
@@ -63,183 +47,68 @@ def convert_cubed_sphere_to_fem(grid_points: Dict) -> Tuple[np.ndarray, np.ndarr
     tol = avg_spacing * 0.1  # 10% of average spacing (Increased from 1% to fix connectivity)
     
     print(f"  Using tolerance: {tol:.2e} (euclidean distance)")
-    
-    node_coords = []
-    global_node_id = 0
-    
-    # Use spatial hash map for efficient duplicate detection
-    # Key: rounded coordinates, Value: list of (node_id, exact_coords)
-    spatial_hash = {}
-    hash_resolution = 1.0 / tol  # Resolution for hashing
-    
-    def coord_to_hash(coord):
-        """Convert coordinate to spatial hash key."""
-        return tuple(np.round(coord * hash_resolution).astype(int))
-    
-    def find_existing_node(coord):
-        """Find existing node within tolerance using euclidean distance."""
-        hash_key = coord_to_hash(coord)
-        
-        # Check this cell and neighboring cells in hash grid
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    neighbor_key = (hash_key[0] + dx, hash_key[1] + dy, hash_key[2] + dz)
-                    if neighbor_key in spatial_hash:
-                        for node_id, node_coord in spatial_hash[neighbor_key]:
-                            # Use absolute euclidean distance
-                            if np.linalg.norm(coord - node_coord) < tol:
-                                return node_id
-        return None
-    
-    def add_node(coord):
-        """Add a new node to the spatial hash."""
-        nonlocal global_node_id
-        hash_key = coord_to_hash(coord)
-        
-        if hash_key not in spatial_hash:
-            spatial_hash[hash_key] = []
-        
-        node_id = global_node_id
-        spatial_hash[hash_key].append((node_id, coord.copy()))
-        node_coords.append(coord)
-        global_node_id += 1
-        return node_id
-    
-    # Build global node list and mapping
+
+    global_nodes = []
+    connectivity = []
     node_mapping = {}
-    
-    print("Converting cubed-sphere to unified FEM...")
-    print(f"  Grid size: {rows}x{cols} per face")
-    
+    node_hash = {}
+    node_id = 0
+
     for face_id in range(n_faces):
         face_key = f'face_{face_id}'
         face_data = grid_points[face_key]
         xs = face_data['x']
         ys = face_data['y']
         zs = face_data['z']
-        
+
         face_node_indices = np.zeros((rows, cols), dtype=np.int32)
-        
+
         for i in range(rows):
             for j in range(cols):
                 x, y, z = xs[i, j], ys[i, j], zs[i, j]
                 coord = np.array([x, y, z])
-                
-                # Check if this node already exists (shared boundary)
-                node_id = find_existing_node(coord)
-                
-                if node_id is None:
-                    # New node - add it
-                    node_id = add_node(coord)
-                
-                face_node_indices[i, j] = node_id
-        
+
+                # Spatial hash based on rounded coordinates to tolerance
+                h = tuple(np.round(coord / tol, 4))
+                if h in node_hash:
+                    face_node_indices[i, j] = node_hash[h]
+                else:
+                    global_nodes.append(coord)
+                    node_hash[h] = node_id
+                    face_node_indices[i, j] = node_id
+                    node_id += 1
+
         node_mapping[face_key] = face_node_indices
-    
-    global_nodes = np.array(node_coords)
-    
-    # --- SECOND PASS: FUSE NODES AGAIN ---
-    # Sometimes the first pass misses some connections due to order of operations
-    print("  Running second pass of node fusion...")
-    n_initial = len(global_nodes)
-    remap = np.arange(n_initial)
-    spatial_hash_2 = {}
-    
-    for i in range(n_initial):
-        coord = global_nodes[i]
-        hash_key = coord_to_hash(coord)
-        found = False
-        
-        # Check neighbors
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    nk = (hash_key[0]+dx, hash_key[1]+dy, hash_key[2]+dz)
-                    if nk in spatial_hash_2:
-                        for existing_id in spatial_hash_2[nk]:
-                            if np.linalg.norm(global_nodes[existing_id] - coord) < tol:
-                                remap[i] = existing_id
-                                found = True
-                                break
-                    if found: break
-                if found: break
-        
-        if not found:
-            if hash_key not in spatial_hash_2:
-                spatial_hash_2[hash_key] = []
-            spatial_hash_2[hash_key].append(i)
-            
-    # Compact nodes
-    unique_ids = np.unique(remap)
-    final_node_count = len(unique_ids)
-    
-    # Map old_id -> new_compact_id
-    compact_map = np.full(n_initial, -1, dtype=np.int32)
-    compact_map[unique_ids] = np.arange(final_node_count)
-    
-    # Create final global nodes
-    final_nodes = global_nodes[unique_ids]
-    
-    # Update node mapping
-    for key in node_mapping:
-        # First remap to merged ID, then to compact ID
-        node_mapping[key] = compact_map[remap[node_mapping[key]]]
-        
-    global_nodes = final_nodes
-    print(f"  Pass 2: Reduced from {n_initial} to {len(global_nodes)} nodes")
-    # -------------------------------------
-    
-    # Statistics
-    total_face_nodes = rows * cols * n_faces
-    merged_nodes = total_face_nodes - len(global_nodes)
-    print(f"  Total face nodes: {total_face_nodes}")
-    print(f"  Unique nodes: {len(global_nodes)}")
-    print(f"  Merged nodes: {merged_nodes} ({100*merged_nodes/total_face_nodes:.1f}%)")
-    
-    # Build connectivity matrix (elements)
-    connectivity_list = []
-    
+
+    # Build connectivity (quads) per face
     for face_id in range(n_faces):
         face_key = f'face_{face_id}'
-        face_indices = node_mapping[face_key]
-        
+        face_node_indices = node_mapping[face_key]
         for i in range(rows - 1):
             for j in range(cols - 1):
-                # Quadrilateral element with 4 nodes (counter-clockwise)
-                n0 = face_indices[i, j]
-                n1 = face_indices[i, j+1]
-                n2 = face_indices[i+1, j+1]
-                n3 = face_indices[i+1, j]
-                
-                connectivity_list.append([n0, n1, n2, n3])
-    
-    connectivity = np.array(connectivity_list, dtype=np.int32)
-    
-    print(f"  Total elements: {len(connectivity)}")
-    if False :
-        print("Starting mesh validation...")
-        # Validate connectivity
-        max_node_id = np.max(connectivity)
-        if max_node_id >= len(global_nodes):
-            print(f"  WARNING: Invalid connectivity detected!")
-            print(f"  Max node ID in connectivity: {max_node_id}")
-            print(f"  Total nodes: {len(global_nodes)}")
-        
-        # Check for duplicate nodes that should have been merged
-        duplicate_count = 0
-        for i in range(len(global_nodes)):
-            for j in range(i + 1, len(global_nodes)):
-                if np.linalg.norm(global_nodes[i] - global_nodes[j]) < tol:
-                    duplicate_count += 1
-        
-        if duplicate_count > 0:
-            print(f"  WARNING: Found {duplicate_count} duplicate nodes within tolerance!")
-        else:
-            print(f"  ✓ No duplicate nodes found - mesh is properly connected")
-    
+                n0 = face_node_indices[i, j]
+                n1 = face_node_indices[i + 1, j]
+                n2 = face_node_indices[i + 1, j + 1]
+                n3 = face_node_indices[i, j + 1]
+                connectivity.append([n0, n1, n2, n3])
+
+    global_nodes = np.array(global_nodes)
+    connectivity = np.array(connectivity)
+
+    # Quick duplicate check
+    duplicate_count = 0
+    for i in range(len(global_nodes)):
+        for j in range(i + 1, len(global_nodes)):
+            if np.linalg.norm(global_nodes[i] - global_nodes[j]) < tol:
+                duplicate_count += 1
+
+    if duplicate_count > 0:
+        print(f"  WARNING: Found {duplicate_count} duplicate nodes within tolerance!")
+    else:
+        print(f"  ✓ No duplicate nodes found - mesh is properly connected")
+
     print(f"  ✓ FEM mesh created: {len(global_nodes)} nodes, {len(connectivity)} elements")
-    
+
     return global_nodes, connectivity, node_mapping
 
 

@@ -161,8 +161,10 @@ py::array_t<float> get_surface_temp() {
 
     //add some random to debug
     for (int i = 0; i < n_elem; i++) {
-        foo[i] += 0.001f* static_cast <float> (rand()) / (static_cast <float> (RAND_MAX/0.1f));
+        //foo[i] +=  50.0f* static_cast <float> (rand()) / (static_cast <float> (RAND_MAX));
     }    
+
+     
 
     py::capsule free_when_done(foo, [](void *f) {
         float *foo = reinterpret_cast<float *>(f);

@@ -18,7 +18,7 @@ except ImportError as e:
 cuda_fem_solver.init()
 
 # Exemplo: malha quadrada simples, NxN nodes e (N-1)x(N-1) elementos
-dt =  1000.0   # passo de tempo
+dt =  100.0   # passo de tempo
 n =10
 
 nodes_pos = [ (x, y, 0) for x in range(n) for y in range(n) ]

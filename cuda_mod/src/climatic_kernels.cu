@@ -81,7 +81,8 @@
         if (l == 0) total_q += sensible_heat; // Primeira camada recebe calor do solo por contato
 
         float dT = (total_q / heat_cap_air) * dt;
-        temp_air_out[offset + l] = temp_air[offset + l] + dT;
+        float tout =  temp_air[offset + l] + dT;
+        temp_air_out[offset + l] =  tout  ;
     }
 }
  
