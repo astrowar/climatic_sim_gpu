@@ -9,7 +9,7 @@ __kernel void compute_physics(__global const float* surface_temp,
     // Snow/Ice Albedo Feedback
     // Base albedo (Ocean/Land)
     float base_albedo = 0.3f;
-    float snow_albedo = 0.7f;
+    float snow_albedo = 0.55f;
     
     // Freezing point
     float T_freeze = 273.15f;

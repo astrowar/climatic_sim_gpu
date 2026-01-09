@@ -19,6 +19,9 @@ __kernel void compute_radiation(__global const float* temp_in,
 
     // 1. Surface Radiation Balance
     float T_surf = surface_temp_in[gid];
+    // Get Surface Air Temp (Layer 0)
+    float T_air_surf = temp_in[gid * n_layers];
+
     float alb = albedo[gid];
     float lat = latitudes[gid];
     
@@ -35,8 +38,13 @@ __kernel void compute_radiation(__global const float* temp_in,
     const float GREENHOUSE_FACTOR = 0.6f; 
     float lw_out = GREENHOUSE_FACTOR * STEFAN_BOLTZMANN * pown(T_surf, 4);
     
+    // Sensible Heat Flux (Air <-> Surface)
+    // Warm air heats cold surface, Cold surface cools warm air
+    const float SENSIBLE_COEFF = 15.0f; // W/(m^2 K)
+    float sensible_flux = SENSIBLE_COEFF * (T_air_surf - T_surf);
+
     // Net Flux
-    float net_flux = solar_in - lw_out;
+    float net_flux = solar_in - lw_out + sensible_flux;
     
     // Update Surface Temp
     float dT_surf = (net_flux / SURFACE_HEAT_CAPACITY) * dt;
@@ -48,8 +56,11 @@ __kernel void compute_radiation(__global const float* temp_in,
         int idx = gid * n_layers + l;
         float T_air = temp_in[idx];
         
-        // Target temp decreases with height
-        float T_target = 288.15f - (l * 6.5f); 
+        // Target temp decreases with height and latitude
+        // Base temp: 288.15 K (15 C) at equator, decreasing to ~248 K (-25 C) at poles
+        float sin_lat = sin(lat);
+        float T_base = 288.15f - 40.0f * sin_lat * sin_lat;
+        float T_target = T_base - (l * 6.5f); 
         
         // Relaxation time scale (e.g., 10 days = 864000s)
         float tau = 864000.0f;

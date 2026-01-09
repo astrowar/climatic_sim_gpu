@@ -59,7 +59,7 @@ def run_simulation_process(solver_class, grid_points, elevation_data, dt, data_q
                     # Put in queue (blocking with timeout to allow checking running_event)
                     if not data_queue.full():
                         data_queue.put(data_copy)
-                        if frame_count % 5 == 0:
+                        if frame_count % 1000 == 0:
                             print(f"[SIM PROCESS] Sent frame {frame_count}")
                         frame_count += 1
                 except Exception as e:
@@ -1190,8 +1190,19 @@ class OpenGLSphereViewer:
         
         # Calculate max speed for scaling
         max_speed = np.max(np.linalg.norm(global_winds, axis=1))
+        
+        # NON-LINEAR SCALING: Use power law to make small winds visible
+        # Length ~ speed^power. Power < 1.0 boosts small values.
+        scale_power = 0.5 
+        
         target_max_len = 0.07
-        scale = target_max_len / max_speed if max_speed > 0.001 else 1.0
+        
+        if max_speed > 0.001:
+            # We want: max_len = global_factor * (max_speed ** power)
+            # So: global_factor = max_len / (max_speed ** power)
+            global_scale_factor = target_max_len / (max_speed**scale_power)
+        else:
+            global_scale_factor = 1.0
         
         # Spatial sampling: select nodes that are sufficiently far apart
         # This ensures uniform density across the sphere
@@ -1227,7 +1238,15 @@ class OpenGLSphereViewer:
             speed = np.sqrt(vx*vx + vy*vy + vz*vz)
             if speed < 0.001:
                 continue
-                
+            
+            # Calculate local scale for this arrow based on non-linear factor
+            # We want visual_length = global_scale_factor * (speed ** power)
+            # draw_arrow uses: actual_length = speed * argument_scale
+            # So: argument_scale = visual_length / speed
+            # argument_scale = global_scale_factor * speed^(power-1)
+            
+            scale = global_scale_factor * (speed ** (scale_power - 1.0))
+
             mag = np.sqrt(x*x + y*y + z*z)
             nx, ny, nz = x/mag, y/mag, z/mag
             
@@ -1404,14 +1423,9 @@ class OpenGLSphereViewer:
             
             frame_count += 1
             if current_time - fps_time >= 1.0:
-                if not self.use_threaded_simulation and self.animate_fem and self.fem_solver is not None:
-                    #print(f"[VIS] FPS: {frame_count} | Time: {self.fem_solver.time:.2f}s")
-                    pass
-                elif self.use_threaded_simulation:
-                    pass
-                #print(f"[VIS] Render FPS: {frame_count}")
-                frame_count = 0
-                fps_time = current_time
+                 print(f"[FPS] Viewer: {frame_count} | Queue size: {self.data_queue.qsize()}")
+                 frame_count = 0
+                 fps_time = current_time
             
             time.sleep(0.001)
         

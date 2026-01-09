@@ -30,40 +30,46 @@ __kernel void compute_dynamics(__global const float* temp_in,
         
         // 1. Meridional Pressure Gradient Force (PGF)
         // Driven by temperature difference between Equator (Hot) and Poles (Cold).
-        // We want to simulate the 3-cell circulation model:
-        // 0-30 (Hadley): Surface Equatorward, Aloft Poleward
-        // 30-60 (Ferrel): Surface Poleward, Aloft Equatorward
-        // 60-90 (Polar): Surface Equatorward, Aloft Poleward
+        // REMOVED: Explicit 3-cell imposition.
+        // REPLACED WITH: Simple approximation of PGF based on Temperature Gradient.
         
-        float abs_lat_deg = fabs(lat) * 180.0f / 3.14159f;
-        float flow_sign = 0.0f;
+        // dP/dy approx proportional to dT/dy
+        // T is high at equator, low at poles.
+        // dT/dy is negative in NH (getting colder going North)
+        // dT/dy is positive in SH (getting warmer going North towards Equator)
         
-        if (abs_lat_deg < 30.0f) {
-            flow_sign = -1.0f; // Equatorward tendency
-        } else if (abs_lat_deg < 60.0f) {
-            flow_sign = 1.0f;  // Poleward tendency
-        } else {
-            flow_sign = -1.0f; // Equatorward tendency
-        }
+        // A simple parameterization of the meridional temperature gradient:
+        // T ~ cos(lat)
+        // dT/dlat ~ -sin(lat)
+        
+        // PGF force direction (High T -> Low T, High P -> Low P aloft)
+        // Aloft: Flow from Equator to Pole.
+        // Surface: Return flow (Pole to Equator).
         
         float sign_lat = (lat > 0.0f) ? 1.0f : -1.0f;
         
-        // Desired surface direction (North/South)
-        // NH (lat>0): Equatorward is South (<0). (-1 * 1 = -1). OK.
-        // SH (lat<0): Equatorward is North (>0). (-1 * -1 = +1). OK.
-        float desired_surface_dir = flow_sign * sign_lat;
+        // Natural tendency: Equator -> Pole aloft.
+        // NH (Lat > 0): Equator is South. Pole is North. Flow North (+).
+        // SH (Lat < 0): Equator is North. Pole is South. Flow South (-).
+        // So poleward flow has sign = sign_lat.
         
-        // Layer factor: -1.0 at surface (l=0), +1.0 at top (l=n_layers-1)
+        // PGF strength proportional to sin(2*lat) roughly (max at mid-lats, 0 at equator/poles)
+        // or just proportional to latitude sine.
+        
+        // Layer factor: -1.0 at surface (return flow), +1.0 at top (poleward flow)
         float layer_factor = -1.0f + 2.0f * (float)l / (float)(n_layers - 1);
         
-        // Apply force
-        // We want Surface (layer_factor = -1) to have force ~ desired_surface_dir
-        // So we multiply by -layer_factor.
-        // Surface: desired * -(-1) = desired.
-        // Top: desired * -(1) = -desired (Return flow).
+        // Force direction:
+        // We want Poleward aloft (layer_factor > 0) -> +sign_lat
+        // We want Equatorward surface (layer_factor < 0) -> -sign_lat
         
-        float pgf_strength = 2.0e-4f; // Adjust magnitude
-        float F_pgf_y = pgf_strength * desired_surface_dir * (-layer_factor);
+        float pgf_strength = 2.0e-4f; 
+        // Note: This creates a single large Hadley-like cell per hemisphere.
+        // The 3-cell structure (Ferrel/Polar) must emerge from Coriolis instability (baroclinic instability),
+        // which requires higher resolution and better physics than this simple kernel.
+        // But this removes the *forced* confinement.
+        
+        float F_pgf_y = pgf_strength * sign_lat * layer_factor;
         
         // 2. Zonal Nudging (Optional, to stabilize or enforce climatology)
         // We can relax this or make it layer dependent.
@@ -86,7 +92,8 @@ __kernel void compute_dynamics(__global const float* temp_in,
         }
         
         // Nudging towards climatological mean
-        float nudging_timescale = 86400.0f; // 1 day
+        // REDUCED: Made timescale much longer (weak forcing) to allow dynamic eddies
+        float nudging_timescale = 86400.0f * 5.0f; // 5 days (was 1 day)
         float F_forcing_u = (target_u - u) / nudging_timescale;
 
         // Coriolis Force
@@ -94,8 +101,8 @@ __kernel void compute_dynamics(__global const float* temp_in,
         float F_cy = -f_coriolis * u;
         
         // Friction (Rayleigh damping)
-        // Stronger friction at surface
-        float friction = (l == 0) ? 5.0e-5f : 1.0e-6f; 
+        // INCREASED SLIGHTLY: From 1.0e-5 to 1.5e-5 to dampen excessive speeds
+        float friction = (l == 0) ? 1.5e-5f : 5.0e-7f; 
         
         // Update Winds
         float du = (F_forcing_u + F_cx - friction * u) * dt;

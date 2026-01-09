@@ -2,6 +2,7 @@ import pyopencl as cl
 import numpy as np
 import os
 import sys
+import time
 from typing import Dict, Tuple
 
 # Ensure we can import from root
@@ -14,6 +15,7 @@ except ImportError:
     convert_cubed_sphere_to_fem = None
 
 from .climatic_data import ClimaticModelData
+from python_solver.simulation_params import EARTH_RADIUS
 
 class OpenCLFEMSolver:
     """
@@ -51,8 +53,19 @@ class OpenCLFEMSolver:
         
         # 4. Upload Mesh to Device
         mf = cl.mem_flags
+        
+        # Create Physics Nodes (Scaled to Earth Radius)
+        # Check if we need to scale (if radius is ~1.0)
+        p0 = self.global_nodes[0]
+        r0 = np.sqrt(p0[0]**2 + p0[1]**2 + p0[2]**2)
+        
+        physics_nodes = np.array(self.global_nodes, dtype=np.float32)
+        if r0 < 1000.0:
+            print(f"[Solver] Scaling mesh from R={r0:.2f} to Earth Radius ({EARTH_RADIUS:.0f} m)")
+            physics_nodes *= (EARTH_RADIUS / r0)
+            
         # Nodes (n_nodes, 3) -> flattened
-        nodes_np = np.array(self.global_nodes, dtype=np.float32).flatten()
+        nodes_np = physics_nodes.flatten()
         self.d_nodes = cl.Buffer(self.context, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=nodes_np)
         
         # Connectivity (n_elements, 4) -> flattened
@@ -98,6 +111,7 @@ class OpenCLFEMSolver:
         self.time = 0.0
         self.simulation_type = None
         self.sim_params = {}
+        self.step_counter = 0
 
     def _load_program(self):
         kernel_dir = os.path.join(os.path.dirname(__file__), 'kernels')
@@ -183,17 +197,27 @@ class OpenCLFEMSolver:
                                        np.int32(self.n_layers))
         
         # 2. Dynamics (Momentum): u_in, v_in -> u_out, v_out
-        self.kernels['compute_dynamics'](self.queue, (self.n_elements,), None,
-                                      self.data.temp_out, # Use updated temp
-                                      self.data.pressure,
-                                      self.data.u_wind_in,
-                                      self.data.v_wind_in,
-                                      self.data.u_wind_out,
-                                      self.data.v_wind_out,
-                                      self.d_latitudes,
-                                      np.float32(dt),
-                                      np.int32(self.n_elements),
-                                      np.int32(self.n_layers))
+        # Sub-stepping for stability (2 steps of dt/2)
+        n_substeps = 2
+        dt_dyn = dt / n_substeps
+        
+        for i in range(n_substeps):
+            self.kernels['compute_dynamics'](self.queue, (self.n_elements,), None,
+                                          self.data.temp_out, # Use updated temp
+                                          self.data.pressure,
+                                          self.data.u_wind_in,
+                                          self.data.v_wind_in,
+                                          self.data.u_wind_out,
+                                          self.data.v_wind_out,
+                                          self.d_latitudes,
+                                          np.float32(dt_dyn),
+                                          np.int32(self.n_elements),
+                                          np.int32(self.n_layers))
+            
+            # Swap wind buffers for next sub-step (Ping-Pong)
+            if i < n_substeps - 1:
+                 self.data.u_wind_in, self.data.u_wind_out = self.data.u_wind_out, self.data.u_wind_in
+                 self.data.v_wind_in, self.data.v_wind_out = self.data.v_wind_out, self.data.v_wind_in
 
         # 3. Advection: Transport temp_out using u_out, v_out
         # (Placeholder: currently just copy)
@@ -216,6 +240,10 @@ class OpenCLFEMSolver:
         
         # 5. Swap Buffers
         self.data.swap_buffers()
+        
+        # Wait for GPU
+        self.queue.finish()
+        t_gpu = time.time()
         
         # 6. Read back surface temperature for visualization
         surface_temp_host = np.empty(self.n_elements, dtype=np.float32)
@@ -255,11 +283,26 @@ class OpenCLFEMSolver:
         t_mean = np.mean(surface_temp_host)
         vertical_motion_surf = surface_temp_host - t_mean
         
+        t_readback = time.time()
+        
         # Log min/max temperatures
-        t_min = np.min(surface_temp_host)
-        t_max = np.max(surface_temp_host)
-        t_avg = np.mean(surface_temp_host)
-        print(f"[Sim t={self.time:.1f}s] Surface Temp (K): Min={t_min:.2f}, Max={t_max:.2f}, Avg={t_avg:.2f}")
+        self.step_counter += 1
+        if self.step_counter % 20 == 0:
+            t_min = np.min(surface_temp_host)
+            t_max = np.max(surface_temp_host)
+            t_avg = np.mean(surface_temp_host)
+            # Conversion to Celsius
+            t_min_c = t_min - 273.15
+            t_max_c = t_max - 273.15
+            t_avg_c = t_avg - 273.15
+            
+            # Wind Speed Statistics
+            # Speed = sqrt(u^2 + v^2)
+            wind_speed = np.sqrt(u_surf**2 + v_surf**2)
+            w_avg_kmh = np.mean(wind_speed) * 3.6
+            w_max_kmh = np.max(wind_speed) * 3.6
+            
+            print(f"[Sim t={self.time:.1f}s] Temp (C): Min={t_min_c:.1f}, Avg={t_avg_c:.1f}, Max={t_max_c:.1f} | Wind (km/h): Avg={w_avg_kmh:.1f}, Max={w_max_kmh:.1f}")
 
         # 7. Interpolate to nodes
         scalars = self.interpolate_to_nodes(surface_temp_host)
@@ -267,12 +310,19 @@ class OpenCLFEMSolver:
         vertical_nodes, vertical_flat = self.interpolate_to_nodes(vertical_motion_surf, return_flat=True)
         albedo_nodes = self.interpolate_to_nodes(albedo_host)
         
+        t_interp_scalar = time.time()
+        
         # Interpolate vectors to nodes
         # We need to map local (u,v) to global (x,y,z) vectors on the sphere surface
         # This is non-trivial because u,v are in local tangent space (East, North).
         # For visualization, we need global Cartesian vectors.
         vectors = self.interpolate_vectors_to_nodes(u_surf, v_surf)
         
+        t_interp_vector = time.time()
+        
+        if self.step_counter % 200 == 0:
+             print(f"[Perf] Total: {(t_interp_vector - t_start)*1000:.1f}ms | GPU: {(t_gpu - t_start)*1000:.1f}ms | Read: {(t_readback - t_gpu)*1000:.1f}ms | IntScal: {(t_interp_scalar - t_readback)*1000:.1f}ms | IntVec: {(t_interp_vector - t_interp_scalar)*1000:.1f}ms")
+
         self.time += dt
         
         return {
